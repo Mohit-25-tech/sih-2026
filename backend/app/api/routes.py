@@ -344,11 +344,12 @@ def verify_face(payload: FaceVerifyRequest, db: Session = Depends(get_db)):
     # Update document risk score in DB with real face match score
     if doc.risk_score:
         existing_factors = dict(doc.risk_score.factors) if doc.risk_score.factors else {}
+        is_mrz = bool(existing_factors.get("mrz_detected", False))
         mrz_data = {
-            "mrz_detected": existing_factors.get("mrz_detected", True),
-            "checksum_pass": existing_factors.get("checksum_pass", True),
-            "checksum_errors": [] if existing_factors.get("checksum_pass", True) else ["Checksum mismatch"],
-            "mrz_checksum": existing_factors.get("mrz_checksum", "N/A - No MRZ Zone Found")
+            "mrz_detected": is_mrz,
+            "checksum_pass": existing_factors.get("checksum_pass") if is_mrz else None,
+            "checksum_errors": existing_factors.get("checksum_errors", []) if is_mrz else [],
+            "mrz_checksum": existing_factors.get("mrz_checksum", "N/A") if is_mrz else "N/A"
         }
         extracted_fields_data = [
             {
@@ -390,7 +391,7 @@ def verify_face(payload: FaceVerifyRequest, db: Session = Depends(get_db)):
         document_id=doc.id,
         match_score=score,
         is_match=is_match,
-        threshold=65.0,
+        threshold=70.0,
         details=details
     )
 

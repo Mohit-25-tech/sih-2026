@@ -128,18 +128,22 @@ export default function DocumentDetail({ docId, onBack }) {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="enterprise-card p-4">
               <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">MRZ Checksum</div>
-              <div className={`text-base font-bold mt-1 ${factors.checksum_pass ? 'text-emerald-600' : 'text-red-600'}`}>
-                {factors.checksum_pass ? 'PASS' : 'FAIL'}
+              <div className={`text-base font-bold mt-1 ${!factors.mrz_detected ? 'text-slate-500' : (factors.checksum_pass ? 'text-emerald-600' : 'text-red-600')}`}>
+                {!factors.mrz_detected ? 'N/A' : (factors.checksum_pass ? 'PASS' : 'FAIL')}
               </div>
-              <div className="text-[11px] text-slate-500 mt-0.5">ICAO 9303 standard</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                {!factors.mrz_detected ? 'No MRZ on document' : 'ICAO 9303 standard'}
+              </div>
             </div>
 
             <div className="enterprise-card p-4">
               <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Field Consistency</div>
-              <div className={`text-base font-bold mt-1 ${factors.mismatched_count === 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                {factors.mismatched_count === 0 ? 'Consistent' : `${factors.mismatched_count} Mismatches`}
+              <div className={`text-base font-bold mt-1 ${!factors.mrz_detected ? 'text-slate-500' : (factors.mismatched_count === 0 ? 'text-emerald-600' : 'text-amber-600')}`}>
+                {!factors.mrz_detected ? 'N/A' : (factors.mismatched_count === 0 ? 'Consistent' : `${factors.mismatched_count} Mismatches`)}
               </div>
-              <div className="text-[11px] text-slate-500 mt-0.5">Visual vs MRZ zone</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                {!factors.mrz_detected ? 'Cross-zone check skipped' : 'Visual vs MRZ zone'}
+              </div>
             </div>
 
             <div className="enterprise-card p-4">

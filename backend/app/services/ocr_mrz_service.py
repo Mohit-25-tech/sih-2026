@@ -233,11 +233,11 @@ def extract_ocr_and_mrz(image_path: str) -> Tuple[Dict[str, Any], List[Dict[str,
             "dob": "",
             "sex": "",
             "expiry_date": "",
-            "checksum_pass": False,
-            "checksum_errors": ["N/A — No MRZ Zone Found"],
-            "mrz_checksum": "N/A - No MRZ Zone Found"
+            "checksum_pass": None,
+            "checksum_errors": [],
+            "mrz_checksum": "N/A"
         }
-        logger.info("[OCR/MRZ] No MRZ detected. Returning empty fields with mrz_detected=false, mrz_checksum='N/A - No MRZ Zone Found'.")
+        logger.info("[OCR/MRZ] No MRZ detected. Returning empty fields with mrz_detected=false, mrz_checksum='N/A'.")
     else:
         mrz_data["mrz_detected"] = True
         mrz_data["mrz_checksum"] = "PASS" if mrz_data.get("checksum_pass") else "FAIL"

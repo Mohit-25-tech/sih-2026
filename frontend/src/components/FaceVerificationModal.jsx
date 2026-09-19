@@ -291,21 +291,29 @@ export default function FaceVerificationModal({ documentId, onClose, onMatchComp
             className={`p-3.5 rounded-lg border text-xs my-4 ${
               matchResult.is_match
                 ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                : 'bg-red-50 border-red-200 text-red-800'
+                : (matchResult.details?.includes('Face not detected') ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-red-50 border-red-200 text-red-800')
             }`}
           >
             <div className="flex items-center space-x-2 font-bold text-sm mb-1">
               {matchResult.is_match ? (
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+              ) : (matchResult.details?.includes('Face not detected') ? (
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
               ) : (
                 <XCircle className="w-4 h-4 text-red-600" />
-              )}
-              <span>{matchResult.is_match ? 'Biometric Match Verified' : 'Biometric Mismatch Detected'}</span>
+              ))}
+              <span>
+                {matchResult.details?.includes('Face not detected')
+                  ? 'Face Not Detected'
+                  : (matchResult.is_match ? 'Biometric Match Verified' : 'Biometric Mismatch Detected')}
+              </span>
             </div>
             <p className="text-slate-600 text-xs mt-0.5">{matchResult.details}</p>
-            <div className="mt-2 text-[11px] font-mono text-slate-500">
-              Similarity Score: {matchResult.match_score}% (Threshold: {matchResult.threshold}%)
-            </div>
+            {!matchResult.details?.includes('Face not detected') && (
+              <div className="mt-2 text-[11px] font-mono text-slate-500">
+                Similarity Score: {matchResult.match_score}% (Threshold: {matchResult.threshold}%)
+              </div>
+            )}
           </div>
         )}
 

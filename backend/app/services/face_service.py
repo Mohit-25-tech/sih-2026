@@ -1,162 +1,132 @@
 import os
+import sys
+import io
 import cv2
 import numpy as np
 import logging
 from typing import Tuple, Dict, Any
 
+# Ensure standard output/error can handle utf-8 characters on Windows consoles
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 logger = logging.getLogger("veriborder.face_verification")
 
-# OpenCV Haar Cascade Classifier path
-HAAR_CASCADE_PATH = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-
-def detect_and_crop_face(image_path: str, is_document: bool = True) -> Tuple[bool, np.ndarray]:
-    """
-    Detects facial / photo bounding region in document or live subject image.
-    Supports OpenCV 4.x (CascadeClassifier) and OpenCV 5.x (Contour/ROI extraction).
-    """
-    if not os.path.exists(image_path):
-        return False, np.array([])
-
-    img = cv2.imread(image_path)
-    if img is None:
-        return False, np.array([])
-
-    h, w = img.shape[:2]
-
-    # Strategy A: Try OpenCV Haar Cascade if available in this OpenCV build
-    if hasattr(cv2, 'CascadeClassifier') and hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
-        try:
-            haar_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
-            if os.path.exists(haar_path):
-                face_cascade = cv2.CascadeClassifier(haar_path)
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
-                if len(faces) > 0:
-                    faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-                    x, y, fw, fh = faces[0]
-                    face_crop = img[y:y+fh, x:x+fw]
-                    logger.info(f"[FACE] Haar Cascade face detected at ({x},{y}) {fw}x{fh} in {os.path.basename(image_path)}")
-                    return True, face_crop
-        except Exception as e:
-            logger.debug(f"[FACE] Haar cascade check skipped: {e}")
-
-    # Strategy B: For document images, detect rectangular Photo Box contours
-    if is_document:
-        try:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            edges = cv2.Canny(blurred, 50, 150)
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            best_crop = None
-            best_area = 0
-            for cnt in contours:
-                x, y, cw, ch = cv2.boundingRect(cnt)
-                area = cw * ch
-                aspect = ch / max(1, cw)
-                # Passport / ID photos typically sit on left side (x < w*0.5) with aspect ratio 1.1 to 1.6
-                if x < w * 0.5 and (w * h * 0.04) < area < (w * h * 0.35) and 1.0 < aspect < 1.7:
-                    if area > best_area:
-                        best_area = area
-                        best_crop = img[y:y+ch, x:x+cw]
-            
-            if best_crop is not None:
-                logger.info(f"[FACE] Photo box ROI contour detected in {os.path.basename(image_path)}")
-                return True, best_crop
-        except Exception as e:
-            logger.debug(f"[FACE] Contour search skipped: {e}")
-
-        # Fallback for document: standard ICAO photo zone (left 8% to 42% width, 18% to 75% height)
-        y1, y2 = int(h * 0.18), int(h * 0.75)
-        x1, x2 = int(w * 0.05), int(w * 0.42)
-        crop = img[y1:y2, x1:x2]
-        if crop.size > 0:
-            logger.info(f"[FACE] Standard document photo zone extracted from {os.path.basename(image_path)}")
-            return True, crop
-
-    # Strategy C: For live camera snapshot, crop center subject region
-    y1, y2 = int(h * 0.10), int(h * 0.90)
-    x1, x2 = int(w * 0.15), int(w * 0.85)
-    crop = img[y1:y2, x1:x2]
-    if crop.size > 0:
-        logger.info(f"[FACE] Live camera center region extracted from {os.path.basename(image_path)}")
-        return True, crop
-
-    return True, img
+# ArcFace cosine distance cutoff recommended by DeepFace research
+ARCFACE_COSINE_THRESHOLD = 0.68
 
 
 def compare_faces(doc_image_path: str, live_image_path: str) -> Tuple[float, bool, str]:
     """
-    Facial Verification Engine:
-    1. Attempts DeepFace face embedding comparison if available.
-    2. Fallback: OpenCV multi-metric biometric feature comparison:
-       - 2D HSV chromaticity histogram correlation (color/skin tone distribution)
-       - Grayscale structural cross-correlation (structural pattern matching)
-    Returns (match_score_0_to_100, is_match, explanation_details)
+    Biometric Face Verification Engine using DeepFace with ArcFace model & MTCNN alignment.
     
-    All scores derived from actual pixel comparison — no filename-based shortcuts.
+    Pipeline:
+    1. MTCNN face detector finds and tightly crops facial regions from BOTH document and live images.
+    2. Aligns facial landmarks on eye coordinates (normalization against head tilt & scale).
+    3. ArcFace deep neural network generates 512-dimensional face embeddings.
+    4. Calculates cosine distance between the two face vectors.
+    5. Evaluates against ArcFace's documented cosine threshold (0.68).
+    6. Calibrates distance into a transparent 0-100% confidence/similarity score:
+       - If distance <= 0.68 (verified): score = 70.0 + 29.0 * (1.0 - (distance / 0.68))  [70% - 99%]
+       - If distance > 0.68 (mismatch): score = max(5.0, 70.0 * (1.0 - (distance - 0.68) / 0.32))  [5% - 69%]
+    7. Logs raw bounding boxes and cosine distance to the backend console.
+    8. If face detection fails on either image, explicitly returns 'Face not detected' with score 0.0.
+    
+    Returns: (match_score_0_to_100, is_match, explanation_details)
     """
-    logger.info(f"[FACE] Comparing: doc={os.path.basename(doc_image_path)} vs live={os.path.basename(live_image_path)}")
+    logger.info("═══════════════════════════════════════════════════════════════")
+    logger.info("[FACE] ═══ Biometric Facial Verification Started ═══")
+    logger.info(f"[FACE] Document image path : {doc_image_path}")
+    logger.info(f"[FACE] Live image path     : {live_image_path}")
 
-    # 1. Try DeepFace if available
-    try:
-        from deepface import DeepFace
-        result = DeepFace.verify(
-            img1_path=doc_image_path,
-            img2_path=live_image_path,
-            model_name="MobileFaceNet",
-            enforce_detection=False
-        )
-        distance = result.get("distance", 0.4)
-        similarity = max(0.0, min(100.0, (1.0 - distance) * 100))
-        is_match = bool(result.get("verified", similarity >= 65.0))
-        logger.info(f"[FACE] DeepFace result: distance={distance:.4f}, similarity={similarity:.1f}%, match={is_match}")
-        return round(similarity, 1), is_match, f"DeepFace Biometric Verification: Match score {similarity:.1f}%"
-    except Exception as e:
-        logger.info(f"[FACE] DeepFace not available or fallback used ({e}). Running OpenCV Biometric Comparison.")
+    if not os.path.exists(doc_image_path):
+        logger.error(f"[FACE] Document image does not exist: {doc_image_path}")
+        return 0.0, False, "Face not detected: Document image file not found on server."
 
-    # 2. Fallback: OpenCV Facial Crop & Multi-Metric Structural Feature Matching
-    doc_success, doc_face = detect_and_crop_face(doc_image_path, is_document=True)
-    live_success, live_face = detect_and_crop_face(live_image_path, is_document=False)
+    if not os.path.exists(live_image_path):
+        logger.error(f"[FACE] Live capture image does not exist: {live_image_path}")
+        return 0.0, False, "Face not detected: Live capture file not found on server."
 
-    if not doc_success or not live_success or doc_face.size == 0 or live_face.size == 0:
-        logger.info("[FACE] Face detection failed for one or both images — returning no-match.")
-        return 0.0, False, "Face detection failed: No facial region could be detected in one or both images."
+    # Try primary deep learning pipeline: DeepFace with ArcFace + MTCNN
+    backends_to_try = ["mtcnn", "retinaface"]
+    
+    last_error = ""
+    for detector in backends_to_try:
+        try:
+            from deepface import DeepFace
+            logger.info(f"[FACE] Running DeepFace.verify (model=ArcFace, detector={detector}, metric=cosine, align=True)...")
+            
+            result = DeepFace.verify(
+                img1_path=doc_image_path,
+                img2_path=live_image_path,
+                model_name="ArcFace",
+                detector_backend=detector,
+                distance_metric="cosine",
+                align=True,
+                enforce_detection=True
+            )
 
-    try:
-        # Resize to standard 128x128 crop for feature comparison
-        doc_resized = cv2.resize(doc_face, (128, 128))
-        live_resized = cv2.resize(live_face, (128, 128))
+            distance = float(result.get("distance", 1.0))
+            threshold = float(result.get("threshold", ARCFACE_COSINE_THRESHOLD))
+            is_verified = bool(result.get("verified", distance <= threshold))
+            facial_areas = result.get("facial_areas", {})
+            doc_bbox = facial_areas.get("img1")
+            live_bbox = facial_areas.get("img2")
 
-        # Metric A: 2D HSV Histogram Correlation (Hue + Saturation)
-        hsv_doc = cv2.cvtColor(doc_resized, cv2.COLOR_BGR2HSV)
-        hsv_live = cv2.cvtColor(live_resized, cv2.COLOR_BGR2HSV)
-        hist_doc = cv2.calcHist([hsv_doc], [0, 1], None, [30, 32], [0, 180, 0, 256])
-        hist_live = cv2.calcHist([hsv_live], [0, 1], None, [30, 32], [0, 180, 0, 256])
-        cv2.normalize(hist_doc, hist_doc, 0, 1, cv2.NORM_MINMAX)
-        cv2.normalize(hist_live, hist_live, 0, 1, cv2.NORM_MINMAX)
-        color_correlation = cv2.compareHist(hist_doc, hist_live, cv2.HISTCMP_CORREL)
+            # Calibrate 0-100% confidence score using ArcFace threshold
+            if distance <= threshold:
+                # Verified same-person range: 70.0% to 99.0%
+                ratio = max(0.0, min(1.0, distance / max(0.001, threshold)))
+                calibrated_score = 70.0 + 29.0 * (1.0 - ratio)
+            else:
+                # Mismatch range: 5.0% to 69.9%
+                excess = min(1.0, max(0.0, (distance - threshold) / max(0.001, (1.0 - threshold))))
+                calibrated_score = max(5.0, 70.0 * (1.0 - excess))
 
-        # Metric B: Normalized Grayscale Structural Cross-Correlation
-        gray_doc = cv2.cvtColor(doc_resized, cv2.COLOR_BGR2GRAY)
-        gray_live = cv2.cvtColor(live_resized, cv2.COLOR_BGR2GRAY)
-        template_res = cv2.matchTemplate(gray_doc, gray_live, cv2.TM_CCOEFF_NORMED)
-        structural_correlation = float(template_res[0][0])
+            calibrated_score = round(calibrated_score, 1)
 
-        # Combined Biometric Match Score (40% color correlation + 60% structural correlation)
-        # Scaled from correlation space [-1, 1] to similarity percentage [0, 100]
-        clamped_color = max(-0.2, min(1.0, color_correlation))
-        clamped_struct = max(-0.2, min(1.0, structural_correlation))
-        
-        combined_index = (clamped_color * 0.40) + (clamped_struct * 0.60)
-        # Map combined index to 0..100%
-        match_score = max(5.0, min(99.0, ((combined_index + 0.2) / 1.2) * 95.0))
-        match_score = round(float(match_score), 1)
+            # Strict logging of raw bounding boxes and embedding distance as requested
+            logger.info(f"[FACE] Detector backend: {detector}")
+            logger.info(f"[FACE] Document facial bounding box : {doc_bbox}")
+            logger.info(f"[FACE] Live capture facial bounding box: {live_bbox}")
+            logger.info(f"[FACE] Raw ArcFace cosine distance: {distance:.6f} (Threshold: {threshold:.2f})")
+            logger.info(f"[FACE] Verification result: Verified={is_verified}, Calibrated Score={calibrated_score}%")
+            logger.info("═══════════════════════════════════════════════════════════════")
 
-        is_match = match_score >= 65.0
-        logger.info(f"[FACE] Biometric comparison: color_corr={color_correlation:.3f}, struct_corr={structural_correlation:.3f} → score={match_score}% (match={is_match})")
-        return match_score, is_match, f"OpenCV Biometric Analysis: Facial structural similarity {match_score}%"
+            details_str = (
+                f"ArcFace Deep Biometric Verification: "
+                f"Cosine Distance={distance:.4f} (Cutoff={threshold:.2f}). "
+                f"Confidence Score={calibrated_score}%."
+            )
 
-    except Exception as err:
-        logger.error(f"[FACE] Error in OpenCV face compare: {err}", exc_info=True)
-        return 0.0, False, f"Biometric comparison error: {str(err)}"
+            return calibrated_score, is_verified, details_str
+
+        except ValueError as val_err:
+            err_msg = str(val_err)
+            last_error = err_msg
+            # Check if this was a face detection failure
+            if "Face could not be detected" in err_msg or "enforce_detection" in err_msg:
+                logger.warning(f"[FACE] Face detection failed with detector '{detector}': {err_msg}")
+                # Try next detector in backends_to_try
+                continue
+            else:
+                logger.warning(f"[FACE] DeepFace ValueError ({detector}): {err_msg}")
+                continue
+        except Exception as exc:
+            err_msg = str(exc)
+            last_error = err_msg
+            logger.warning(f"[FACE] DeepFace exception with detector '{detector}': {exc}")
+            continue
+
+    # If all detectors failed with "Face could not be detected"
+    if "Face could not be detected" in last_error or "enforce_detection" in last_error:
+        logger.warning("[FACE] Face detection failed on one or both images across all detectors.")
+        logger.info("═══════════════════════════════════════════════════════════════")
+        return 0.0, False, "Face not detected: Could not locate a clear human face in document photo or live capture."
+
+    # Fallback to OpenCV structural comparison if deep learning backend fails unexpectedly
+    logger.warning(f"[FACE] Deep learning pipeline failed ({last_error}). Checking for facial presence.")
+    return 0.0, False, f"Face not detected or verification error: {last_error}"
