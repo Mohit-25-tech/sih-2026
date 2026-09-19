@@ -1,4 +1,5 @@
 import os
+import uuid
 import cv2
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
@@ -16,18 +17,24 @@ def generate_ela_heatmap(image_path: str, quality: int = 90, scale_factor: int =
     3. Scale error levels for visual magnification.
     4. Generate Jet/Hot color heatmap overlay.
     5. Calculate 0-100 Tamper Score and detect anomaly bounding regions.
+    
+    All scoring is derived purely from pixel analysis — no filename-based shortcuts.
     """
-    filename = os.path.basename(image_path)
-    base_name, _ = os.path.splitext(filename)
-    ela_filename = f"{base_name}_ela.jpg"
+    # Use UUID-based unique filename to avoid collisions across uploads
+    unique_id = uuid.uuid4().hex[:10]
+    ela_filename = f"ela_{unique_id}.jpg"
     ela_output_path = os.path.join(settings.ELA_DIR, ela_filename)
+
+    logger.info(f"[ELA] ═══ Starting ELA analysis ═══")
+    logger.info(f"[ELA] Input image: {image_path}")
+    logger.info(f"[ELA] Output heatmap: {ela_output_path}")
 
     try:
         # Load Original Image with PIL
         original = Image.open(image_path).convert('RGB')
         
         # Temporary resaved file at 90% quality
-        temp_resaved_path = os.path.join(settings.ELA_DIR, f"temp_{base_name}.jpg")
+        temp_resaved_path = os.path.join(settings.ELA_DIR, f"temp_{unique_id}.jpg")
         original.save(temp_resaved_path, 'JPEG', quality=quality)
         resaved = Image.open(temp_resaved_path).convert('RGB')
 
@@ -76,11 +83,16 @@ def generate_ela_heatmap(image_path: str, quality: int = 90, scale_factor: int =
         # Base tamper score calculated from error energy & standard deviation
         tamper_score = min(100.0, max(0.0, (mean_err * 1.8) + (std_err * 1.2)))
 
-        # Check for specific suspicious filenames (for demo consistency)
-        if "fake" in filename.lower() or "tampered" in filename.lower() or "forged" in filename.lower():
-            tamper_score = max(tamper_score, 78.5)
+        # NO filename-based score inflation — score is purely from pixel analysis
 
         is_tampered = tamper_score > 40.0
+
+        logger.info(f"[ELA] Pixel analysis results:")
+        logger.info(f"  • Mean error:   {mean_err:.2f}")
+        logger.info(f"  • Std error:    {std_err:.2f}")
+        logger.info(f"  • Max error:    {max_err:.2f}")
+        logger.info(f"  • Tamper score: {tamper_score:.1f} (threshold: 40.0)")
+        logger.info(f"  • Is tampered:  {is_tampered}")
 
         # Detect Anomaly Regions (High contrast error contours)
         anomaly_regions = []
@@ -95,7 +107,14 @@ def generate_ela_heatmap(image_path: str, quality: int = 90, scale_factor: int =
                 region_roi = gray_ela[y:y+bh, x:x+bw]
                 intensity = float(np.mean(region_roi))
                 
-                label = "Photo Substitution Anomaly" if x < w * 0.4 and y < h * 0.6 else "Text Alteration / Stamp Manipulation"
+                # Determine label based on spatial position within document
+                if x < w * 0.35 and y < h * 0.7:
+                    label = "Photo Region Anomaly"
+                elif y > h * 0.75:
+                    label = "MRZ Zone Anomaly"
+                else:
+                    label = "Text/Field Alteration Anomaly"
+                    
                 anomaly_regions.append({
                     "x": int(x),
                     "y": int(y),
@@ -105,11 +124,16 @@ def generate_ela_heatmap(image_path: str, quality: int = 90, scale_factor: int =
                     "label": label
                 })
 
+        logger.info(f"[ELA] Anomaly regions detected: {len(anomaly_regions)}")
+        for region in anomaly_regions:
+            logger.info(f"  • {region['label']} at ({region['x']},{region['y']}) {region['width']}x{region['height']} intensity={region['intensity']}")
+        logger.info(f"[ELA] ═══ ELA analysis complete ═══")
+
         # Relative path for static file serving
         ela_relative_url = f"/static/ela/{ela_filename}"
         return ela_relative_url, round(tamper_score, 1), is_tampered, anomaly_regions
 
     except Exception as e:
-        logger.error(f"Error executing ELA pipeline: {e}")
-        # Return fallback placeholder
-        return f"/static/ela/{ela_filename}", 15.0, False, []
+        logger.error(f"[ELA] Error executing ELA pipeline: {e}", exc_info=True)
+        # Return zero score with error indication — not a hardcoded fake score
+        return f"/static/ela/{ela_filename}", 0.0, False, []

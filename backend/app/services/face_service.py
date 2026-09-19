@@ -27,8 +27,10 @@ def detect_and_crop_face(image_path: str) -> Tuple[bool, np.ndarray]:
         faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
         x, y, w, h = faces[0]
         face_crop = img[y:y+h, x:x+w]
+        logger.info(f"[FACE] Face detected at ({x},{y}) {w}x{h} in {os.path.basename(image_path)}")
         return True, face_crop
     
+    logger.info(f"[FACE] No face detected in {os.path.basename(image_path)}")
     return False, img
 
 
@@ -38,7 +40,11 @@ def compare_faces(doc_image_path: str, live_image_path: str) -> Tuple[float, boo
     1. Attempts DeepFace face embedding comparison.
     2. Fallback: OpenCV Structural Feature & Histogram Comparison.
     Returns (match_score_0_to_100, is_match, explanation_details)
+    
+    All scores derived from actual pixel comparison — no filename-based shortcuts.
     """
+    logger.info(f"[FACE] Comparing: doc={os.path.basename(doc_image_path)} vs live={os.path.basename(live_image_path)}")
+
     # 1. Try DeepFace if available
     try:
         from deepface import DeepFace
@@ -51,16 +57,19 @@ def compare_faces(doc_image_path: str, live_image_path: str) -> Tuple[float, boo
         distance = result.get("distance", 0.4)
         similarity = max(0.0, min(100.0, (1.0 - distance) * 100))
         is_match = bool(result.get("verified", similarity >= 65.0))
+        logger.info(f"[FACE] DeepFace result: distance={distance:.4f}, similarity={similarity:.1f}%, match={is_match}")
         return round(similarity, 1), is_match, f"DeepFace Biometric Verification: Match score {similarity:.1f}%"
     except Exception as e:
-        logger.info(f"DeepFace not available or fallback used ({e}). Running OpenCV Biometric Comparison.")
+        logger.info(f"[FACE] DeepFace not available or fallback used ({e}). Running OpenCV Biometric Comparison.")
 
     # 2. Fallback: OpenCV Facial Crop & Histogram / Structural Feature Matching
     doc_success, doc_face = detect_and_crop_face(doc_image_path)
     live_success, live_face = detect_and_crop_face(live_image_path)
 
     if not doc_success or not live_success or doc_face.size == 0 or live_face.size == 0:
-        return 72.5, True, "OpenCV Face Detection: Facial region detected in document. Primary landmarks aligned."
+        # No face detected — return honest result, not a hardcoded pass
+        logger.info("[FACE] Face detection failed for one or both images — returning no-match.")
+        return 0.0, False, "Face detection failed: No facial region could be detected in one or both images."
 
     try:
         # Resize to standard 128x128 crop for feature comparison
@@ -79,14 +88,14 @@ def compare_faces(doc_image_path: str, live_image_path: str) -> Tuple[float, boo
 
         correlation = cv2.compareHist(hist_doc, hist_live, cv2.HISTCMP_CORREL)
         match_score = max(0.0, min(100.0, (correlation * 40.0) + 55.0))
-        
-        # Check filename for deliberate demo test cases
-        if "fake" in doc_image_path.lower() or "tampered" in doc_image_path.lower() or "mismatch" in live_image_path.lower():
-            match_score = 38.2
+
+        # NO filename-based branching — score comes purely from pixel comparison
 
         is_match = match_score >= 65.0
+        logger.info(f"[FACE] OpenCV histogram correlation={correlation:.4f}, match_score={match_score:.1f}%, is_match={is_match}")
         return round(match_score, 1), is_match, f"OpenCV Biometric Fallback: Structural facial similarity index {match_score:.1f}%"
 
     except Exception as err:
-        logger.error(f"Error in OpenCV face compare: {err}")
-        return 85.0, True, "Biometric Face Match verified successfully."
+        logger.error(f"[FACE] Error in OpenCV face compare: {err}", exc_info=True)
+        # Return honest error result — not a hardcoded pass
+        return 0.0, False, f"Biometric comparison error: {str(err)}"

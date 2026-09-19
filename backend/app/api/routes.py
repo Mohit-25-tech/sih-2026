@@ -178,34 +178,46 @@ def list_sample_documents():
 
 @router.post("/documents/load-sample/{sample_id}", response_model=DocumentDetailResponse)
 def load_sample_document(sample_id: str, db: Session = Depends(get_db)):
-    """Loads a pre-configured sample document directly for 1-click testing."""
+    """
+    Loads a pre-configured sample document directly for 1-click testing.
+    Runs the full real pipeline — no hardcoded overrides.
+    """
+    import logging
+    log = logging.getLogger("veriborder.routes")
+
     sample_file_map = {
-        "authentic_passport_01": ("sample_authentic_passport.jpg", "Authentic_India_Passport.jpg", False),
-        "tampered_photo_passport_02": ("sample_tampered_passport.jpg", "Tampered_Fake_Passport.jpg", True),
-        "mrz_mismatch_visa_03": ("sample_mismatch_visa.jpg", "Mismatch_Visa_Card.jpg", True)
+        "authentic_passport_01": ("sample_authentic_passport.jpg", "Authentic_India_Passport.jpg"),
+        "tampered_photo_passport_02": ("sample_tampered_passport.jpg", "Tampered_Passport_Altered.jpg"),
+        "mrz_mismatch_visa_03": ("sample_mismatch_visa.jpg", "Mismatch_Visa_Card.jpg")
     }
 
     if sample_id not in sample_file_map:
         sample_id = "authentic_passport_01"
 
-    src_filename, display_filename, is_fake = sample_file_map[sample_id]
+    src_filename, display_filename = sample_file_map[sample_id]
     src_path = os.path.join(settings.SAMPLE_DIR, src_filename)
 
-    # Ensure sample file exists or create a synthetic sample image
+    # Ensure sample file exists — generate if missing
     if not os.path.exists(src_path):
-        from PIL import Image, ImageDraw, ImageFont
-        img = Image.new('RGB', (800, 550), color=(30, 41, 59))
-        d = ImageDraw.Draw(img)
-        d.rectangle([(20, 20), (780, 530)], outline=(100, 116, 139), width=3)
-        d.text((40, 40), f"VERIBORDER SAMPLE: {display_filename}", fill=(241, 245, 249))
-        d.text((40, 100), f"P<IND{sample_id.upper()}<<<<<<<<<<<<<<<<<<", fill=(148, 163, 184))
-        d.text((40, 130), f"J8293041<4IND9205141M2910248<<<<<<<<<<<<<<<0", fill=(148, 163, 184))
-        img.save(src_path)
+        log.warning(f"Sample file missing: {src_path} — regenerating samples...")
+        try:
+            from generate_samples import generate_sample_passport
+            generate_sample_passport("sample_authentic_passport.jpg", is_tampered=False)
+            generate_sample_passport("sample_tampered_passport.jpg", is_tampered=True)
+            generate_sample_passport("sample_mismatch_visa.jpg", is_tampered=True)
+        except Exception as e:
+            log.error(f"Failed to generate samples: {e}")
+            raise HTTPException(status_code=500, detail=f"Sample file not found and regeneration failed: {e}")
+
+    if not os.path.exists(src_path):
+        raise HTTPException(status_code=404, detail=f"Sample file not found: {src_filename}")
 
     # Copy to uploads folder
     unique_filename = f"sample_{uuid.uuid4().hex[:8]}_{src_filename}"
     saved_file_path = os.path.join(settings.UPLOAD_DIR, unique_filename)
     shutil.copyfile(src_path, saved_file_path)
+
+    log.info(f"[SAMPLE] Loading sample '{sample_id}' → {saved_file_path}")
 
     # DB Record
     db_doc = Document(
@@ -218,16 +230,8 @@ def load_sample_document(sample_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_doc)
 
-    # Screening pipeline
+    # Real screening pipeline — NO overrides, NO is_fake branching
     mrz_data, extracted_fields_data = extract_ocr_and_mrz(saved_file_path)
-
-    if is_fake:
-        mrz_data["checksum_pass"] = False
-        mrz_data["checksum_errors"] = ["Document Number Checksum Failed (digit 9 vs calculated 1)"]
-        for ef in extracted_fields_data:
-            if ef["field_name"] == "Date of Birth":
-                ef["visual_value"] = "1988-03-12"
-                ef["is_match"] = False
 
     for field in extracted_fields_data:
         ef = ExtractedField(
@@ -241,13 +245,6 @@ def load_sample_document(sample_id: str, db: Session = Depends(get_db)):
         db.add(ef)
 
     ela_url, ela_score, is_tampered, anomaly_regions = generate_ela_heatmap(saved_file_path)
-    if is_fake:
-        ela_score = max(ela_score, 78.4)
-        is_tampered = True
-        anomaly_regions = [
-            {"x": 60, "y": 90, "width": 180, "height": 220, "intensity": 88.5, "label": "Photo Substitution Anomaly"},
-            {"x": 320, "y": 140, "width": 210, "height": 45, "intensity": 74.2, "label": "DOB Digital Overwriting"}
-        ]
 
     db_tamper = TamperResult(
         document_id=db_doc.id,
@@ -284,6 +281,8 @@ def load_sample_document(sample_id: str, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(db_doc)
+
+    log.info(f"[SAMPLE] Sample '{sample_id}' processed → Risk: {risk_level} ({overall_score})")
 
     return db_doc
 
