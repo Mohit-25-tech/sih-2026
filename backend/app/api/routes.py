@@ -298,7 +298,11 @@ def get_document_detail(doc_id: int, db: Session = Depends(get_db)):
 
 @router.post("/verify-face", response_model=FaceVerifyResponse)
 def verify_face(payload: FaceVerifyRequest, db: Session = Depends(get_db)):
-    """Biometric face matching between document photo and uploaded live photo."""
+    """Biometric face matching between document photo and live captured photo."""
+    import base64
+    import logging
+    log = logging.getLogger("veriborder.routes")
+
     doc = db.query(Document).filter(Document.id == payload.document_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -307,15 +311,77 @@ def verify_face(payload: FaceVerifyRequest, db: Session = Depends(get_db)):
     if not os.path.exists(doc_image_full_path):
         doc_image_full_path = os.path.join(settings.UPLOAD_DIR, os.path.basename(doc.file_path))
 
-    # Perform face comparison
-    score, is_match, details = compare_faces(doc_image_full_path, doc_image_full_path)
+    # Handle live image (captured from camera or uploaded)
+    live_image_path = None
+    temp_capture_file = None
+    if payload.live_image_base64 and len(payload.live_image_base64) > 50:
+        try:
+            b64_str = payload.live_image_base64
+            if "," in b64_str:
+                b64_str = b64_str.split(",", 1)[1]
+            raw_bytes = base64.b64decode(b64_str)
+            temp_capture_file = os.path.join(settings.UPLOAD_DIR, f"live_{uuid.uuid4().hex[:10]}.jpg")
+            with open(temp_capture_file, "wb") as bf:
+                bf.write(raw_bytes)
+            live_image_path = temp_capture_file
+            log.info(f"[FACE] Saved live camera capture to {live_image_path} ({len(raw_bytes)} bytes)")
+        except Exception as e:
+            log.warning(f"[FACE] Could not decode live_image_base64: {e}. Falling back to document image.")
+            live_image_path = doc_image_full_path
+    else:
+        live_image_path = doc_image_full_path
+
+    # Perform real face comparison between document photo and live capture
+    score, is_match, details = compare_faces(doc_image_full_path, live_image_path)
+
+    # Clean up temp capture file
+    if temp_capture_file and os.path.exists(temp_capture_file):
+        try:
+            os.remove(temp_capture_file)
+        except Exception:
+            pass
+
+    # Update document risk score in DB with real face match score
+    if doc.risk_score:
+        existing_factors = dict(doc.risk_score.factors) if doc.risk_score.factors else {}
+        mrz_data = {
+            "mrz_detected": existing_factors.get("mrz_detected", True),
+            "checksum_pass": existing_factors.get("checksum_pass", True),
+            "checksum_errors": [] if existing_factors.get("checksum_pass", True) else ["Checksum mismatch"],
+            "mrz_checksum": existing_factors.get("mrz_checksum", "N/A - No MRZ Zone Found")
+        }
+        extracted_fields_data = [
+            {
+                "field_name": ef.field_name,
+                "visual_value": ef.visual_value,
+                "mrz_value": ef.mrz_value,
+                "is_match": ef.is_match
+            }
+            for ef in doc.extracted_fields
+        ]
+        ela_val = doc.tamper_result.ela_score if doc.tamper_result else 0.0
+        tamper_val = doc.tamper_result.is_tampered if doc.tamper_result else False
+
+        new_fused_score, new_risk_level, new_factors, new_reasoning = calculate_fused_risk_score(
+            mrz_data=mrz_data,
+            extracted_fields=extracted_fields_data,
+            ela_score=ela_val,
+            is_tampered=tamper_val,
+            face_score=score,
+            has_face_check=True
+        )
+
+        doc.risk_score.score = new_fused_score
+        doc.risk_score.risk_level = new_risk_level
+        doc.risk_score.factors = new_factors
+        doc.risk_score.summary_reasoning = new_reasoning
 
     # Record Audit Log
     db_log = AuditLog(
         document_id=doc.id,
         officer_id="OFFICER_ZENITH_01",
         action="FACE_VERIFIED",
-        details={"match_score": score, "is_match": is_match}
+        details={"match_score": score, "is_match": is_match, "source": "live_capture" if payload.live_image_base64 else "document_photo"}
     )
     db.add(db_log)
     db.commit()

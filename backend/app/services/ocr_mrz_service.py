@@ -284,16 +284,13 @@ def extract_ocr_and_mrz(image_path: str) -> Tuple[Dict[str, Any], List[Dict[str,
         else:
             m_val = mrz_data.get(key.lower(), "")
 
-        # If both are empty, mark as match (nothing to compare)
-        if not v_val and not m_val:
-            is_match = True
-            confidence = 0.0  # No data to compare
-        elif v_val and m_val:
+        # Only mark as match if BOTH visual and MRZ values were actually extracted and match
+        if not v_val or not m_val:
+            is_match = False
+            confidence = 0.0  # Not enough data to compare
+        else:
             is_match = (v_val.replace(" ", "") == m_val.replace(" ", ""))
             confidence = 0.95 if is_match else 0.40
-        else:
-            is_match = False
-            confidence = 0.0
 
         extracted_fields.append({
             "field_name": label,

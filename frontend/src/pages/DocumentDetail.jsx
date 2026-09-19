@@ -152,10 +152,12 @@ export default function DocumentDetail({ docId, onBack }) {
 
             <div className="enterprise-card p-4">
               <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Face Match</div>
-              <div className="text-base font-bold text-blue-600 mt-1">
-                {factors.face_match_score || 90}%
+              <div className={`text-base font-bold mt-1 ${factors.has_face_check && factors.face_match_score != null ? (factors.face_match_score >= 65 ? 'text-emerald-600' : 'text-red-600') : 'text-slate-500'}`}>
+                {factors.has_face_check && factors.face_match_score != null ? `${factors.face_match_score}%` : 'Not Run'}
               </div>
-              <div className="text-[11px] text-slate-500 mt-0.5">Biometric similarity</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                {factors.has_face_check ? 'Biometric similarity' : 'Verification pending'}
+              </div>
             </div>
           </div>
 
@@ -214,43 +216,66 @@ export default function DocumentDetail({ docId, onBack }) {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="text-slate-500 border-b border-slate-200 text-[11px] uppercase font-semibold tracking-wider">
-                <th className="pb-3 pl-2">Field Name</th>
-                <th className="pb-3">Visual Zone Value</th>
-                <th className="pb-3">Parsed MRZ Value</th>
-                <th className="pb-3">Confidence</th>
-                <th className="pb-3 pr-2 text-right">Validation Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {fields.map((f, i) => (
-                <tr key={i} className="hover:bg-slate-50 transition-colors">
-                  <td className="py-3 pl-2 font-semibold text-slate-900">{f.field_name}</td>
-                  <td className={`py-3 ${f.is_match ? 'text-slate-800' : 'text-red-600 font-bold'}`}>
-                    {f.visual_value || '—'}
-                  </td>
-                  <td className="py-3 font-mono text-slate-700">{f.mrz_value || '—'}</td>
-                  <td className="py-3 text-slate-500">{(f.confidence * 100).toFixed(0)}%</td>
-                  <td className="py-3 pr-2 text-right">
-                    <span
-                      className={`inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
-                        f.is_match
-                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                          : 'bg-red-50 text-red-700 border-red-200'
-                      }`}
-                    >
-                      {f.is_match ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
-                      <span>{f.is_match ? 'Match' : 'Mismatch'}</span>
-                    </span>
-                  </td>
+        {factors.mrz_detected === false ? (
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center text-slate-500">
+            <p className="text-xs font-semibold text-slate-700">Cross-zone validation not applicable — no MRZ zone detected on this document.</p>
+            <p className="text-[11px] text-slate-500 mt-1">Cross-zone verification compares visual zone fields against cryptographic MRZ fields. For documents without an MRZ (e.g. college IDs, standard licences), this check is bypassed.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="text-slate-500 border-b border-slate-200 text-[11px] uppercase font-semibold tracking-wider">
+                  <th className="pb-3 pl-2">Field Name</th>
+                  <th className="pb-3">Visual Zone Value</th>
+                  <th className="pb-3">Parsed MRZ Value</th>
+                  <th className="pb-3">Confidence</th>
+                  <th className="pb-3 pr-2 text-right">Validation Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {fields.map((f, i) => {
+                  const hasVisual = f.visual_value && f.visual_value !== 'Not Detected';
+                  const hasMrz = f.mrz_value && f.mrz_value !== 'Not Detected';
+                  const isNA = !hasVisual || !hasMrz;
+
+                  return (
+                    <tr key={i} className="hover:bg-slate-50 transition-colors">
+                      <td className="py-3 pl-2 font-semibold text-slate-900">{f.field_name}</td>
+                      <td className={`py-3 ${hasVisual ? (f.is_match ? 'text-slate-800' : 'text-red-600 font-bold') : 'text-slate-400 italic'}`}>
+                        {f.visual_value || '—'}
+                      </td>
+                      <td className={`py-3 font-mono ${hasMrz ? 'text-slate-700' : 'text-slate-400 italic'}`}>
+                        {f.mrz_value || '—'}
+                      </td>
+                      <td className="py-3 text-slate-500">
+                        {isNA ? '—' : `${(f.confidence * 100).toFixed(0)}%`}
+                      </td>
+                      <td className="py-3 pr-2 text-right">
+                        {isNA ? (
+                          <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-slate-100 text-slate-600 border-slate-200">
+                            <span>N/A</span>
+                          </span>
+                        ) : (
+                          <span
+                            className={`inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                              f.is_match
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-red-50 text-red-700 border-red-200'
+                            }`}
+                          >
+                            {f.is_match ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                            <span>{f.is_match ? 'Match' : 'Mismatch'}</span>
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Face Verification Modal Popup */}

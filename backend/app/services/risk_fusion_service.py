@@ -8,15 +8,20 @@ def calculate_fused_risk_score(
     extracted_fields: List[Dict[str, Any]],
     ela_score: float,
     is_tampered: bool,
-    face_score: float = 90.0,
+    face_score: float = None,
     has_face_check: bool = False
 ) -> Tuple[float, str, Dict[str, Any], str]:
     """
     Weighted Risk Fusion Engine:
-    - MRZ Checksum Pass/Fail: 30%
-    - Visual OCR vs MRZ Field Mismatch: 25%
-    - ELA Tamper Confidence Score: 35%
-    - Biometric Face Match Score: 10%
+    - Without Face Check (Initial Upload):
+        - MRZ Checksum Pass/Fail: 33.3% (30/90)
+        - Visual OCR vs MRZ Field Mismatch: 27.8% (25/90)
+        - ELA Tamper Confidence Score: 38.9% (35/90)
+    - With Face Check (Post-Verification):
+        - MRZ Checksum Pass/Fail: 30%
+        - Visual OCR vs MRZ Field Mismatch: 25%
+        - ELA Tamper Confidence Score: 35%
+        - Biometric Face Match Score: 10%
     
     Handles the case where no MRZ zone was detected (e.g. non-passport documents)
     by assigning moderate risk to the MRZ component.
@@ -28,6 +33,7 @@ def calculate_fused_risk_score(
     logger.info(f"[RISK] ═══ Risk Fusion Calculation ═══")
     logger.info(f"[RISK] MRZ detected: {mrz_detected}")
     logger.info(f"[RISK] ELA score: {ela_score}, Is tampered: {is_tampered}")
+    logger.info(f"[RISK] Face check run: {has_face_check}, Face score: {face_score}")
 
     # 1. MRZ Checksum Score (0 = No Risk, 100 = High Risk)
     if not mrz_detected:
@@ -60,16 +66,23 @@ def calculate_fused_risk_score(
     # 3. ELA Forensic Tamper Score
     ela_risk_score = min(100.0, max(0.0, ela_score))
 
-    # 4. Biometric Face Score (Inverted: low match = high risk)
-    face_risk_score = (100.0 - face_score) if has_face_check else 0.0
-
-    # Weighted Sum Formula
-    fused_score = (
-        (mrz_risk_score * 0.30) +
-        (mismatch_risk_score * 0.25) +
-        (ela_risk_score * 0.35) +
-        (face_risk_score * 0.10)
-    )
+    # 4. Biometric Face Score & Weighted Formula
+    if has_face_check and face_score is not None:
+        face_risk_score = max(0.0, min(100.0, 100.0 - face_score))
+        fused_score = (
+            (mrz_risk_score * 0.30) +
+            (mismatch_risk_score * 0.25) +
+            (ela_risk_score * 0.35) +
+            (face_risk_score * 0.10)
+        )
+    else:
+        face_risk_score = 0.0
+        # Re-weight across the 3 active components (weights normalized to 100%)
+        fused_score = (
+            (mrz_risk_score * (0.30 / 0.90)) +
+            (mismatch_risk_score * (0.25 / 0.90)) +
+            (ela_risk_score * (0.35 / 0.90))
+        )
 
     fused_score = round(min(100.0, max(0.0, fused_score)), 1)
 
@@ -82,7 +95,7 @@ def calculate_fused_risk_score(
         risk_level = "HIGH"
 
     logger.info(f"[RISK] Component scores: MRZ={mrz_risk_score}, Mismatch={mismatch_risk_score:.1f}, "
-                f"ELA={ela_risk_score:.1f}, Face={face_risk_score:.1f}")
+                f"ELA={ela_risk_score:.1f}, Face={'N/A' if not has_face_check else f'{face_risk_score:.1f}'}")
     logger.info(f"[RISK] Fused score: {fused_score} → Risk level: {risk_level}")
 
     # Factors Breakdown
@@ -90,7 +103,8 @@ def calculate_fused_risk_score(
         "mrz_checksum_score": round(mrz_risk_score, 1),
         "field_mismatch_score": round(mismatch_risk_score, 1),
         "ela_forensic_score": round(ela_risk_score, 1),
-        "face_match_score": round(face_score, 1),
+        "face_match_score": round(face_score, 1) if (has_face_check and face_score is not None) else None,
+        "has_face_check": has_face_check,
         "checksum_pass": checksum_pass,
         "mismatched_count": len(mismatched_fields),
         "mrz_detected": mrz_detected,
@@ -128,7 +142,7 @@ def calculate_fused_risk_score(
         else:
             reason_lines.append("• Cross-Zone Validation: N/A — No MRZ zone available for comparison.")
 
-    if has_face_check:
+    if has_face_check and face_score is not None:
         if face_score >= 65.0:
             reason_lines.append(f"• Biometric Verification: Live face photo matches document photo ({face_score:.1f}% similarity).")
         else:
