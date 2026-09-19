@@ -237,9 +237,11 @@ def extract_ocr_and_mrz(image_path: str) -> Tuple[Dict[str, Any], List[Dict[str,
             "checksum_errors": ["N/A — No MRZ Zone Found"],
             "mrz_checksum": "N/A - No MRZ Zone Found"
         }
-        logger.info("[OCR/MRZ] No MRZ detected. Returning empty fields with mrz_detected=false.")
+        logger.info("[OCR/MRZ] No MRZ detected. Returning empty fields with mrz_detected=false, mrz_checksum='N/A - No MRZ Zone Found'.")
     else:
         mrz_data["mrz_detected"] = True
+        mrz_data["mrz_checksum"] = "PASS" if mrz_data.get("checksum_pass") else "FAIL"
+        logger.info(f"[OCR/MRZ] MRZ detected: mrz_checksum={mrz_data['mrz_checksum']}")
 
     # Step 2: Attempt PaddleOCR for visual text extraction (best-effort)
     paddle_visual = _attempt_paddleocr_visual(image_path)

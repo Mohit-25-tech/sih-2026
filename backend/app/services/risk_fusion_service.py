@@ -93,7 +93,8 @@ def calculate_fused_risk_score(
         "face_match_score": round(face_score, 1),
         "checksum_pass": checksum_pass,
         "mismatched_count": len(mismatched_fields),
-        "mrz_detected": mrz_detected
+        "mrz_detected": mrz_detected,
+        "mrz_checksum": mrz_data.get("mrz_checksum", "N/A - No MRZ Zone Found" if not mrz_detected else ("PASS" if checksum_pass else "FAIL"))
     }
 
     # Generate Plain-Language Reasoning Summary
